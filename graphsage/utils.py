@@ -44,7 +44,7 @@ def load_data(prefix, normalize=True, load_walks=False):
     print("id_map after process keys:", list(id_map.keys())[:1000])
 
     print("id_map length:", len(id_map.keys()))
-    print("450 id map:" , id_map[450])
+    print("450 id map:", id_map[450])
 
     walks = []
     class_map = json.load(open(prefix + "-class_map.json"))
