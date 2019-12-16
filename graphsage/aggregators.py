@@ -448,3 +448,94 @@ class SeqAggregator(Layer):
        
         return self.act(output)
 
+class GatAggregator(Layer):
+    """
+    Aggregates via mean followed by matmul and non-linearity.
+    """
+
+    def __init__(self, input_dim, output_dim, neigh_input_dim=None,
+                 dropout=0., bias=False, act=tf.nn.relu,
+                 name=None, concat=False, **kwargs):
+        super(GatAggregator, self).__init__(**kwargs)
+
+        self.dropout = dropout
+        self.bias = bias
+        self.act = act
+        self.concat = concat
+
+        if neigh_input_dim is None:
+            neigh_input_dim = input_dim
+
+        if name is not None:
+            name = '/' + name
+        else:
+            name = ''
+
+        with tf.variable_scope(self.name + name + '_vars'):
+            self.vars['neigh_weights'] = glorot([neigh_input_dim, output_dim],
+                                                name='neigh_weights')
+            self.vars['self_weights'] = glorot([input_dim, output_dim],
+                                               name='self_weights')
+            if self.bias:
+                self.vars['bias'] = zeros([self.output_dim], name='bias')
+
+            self.vars['gat_w'] = glorot([input_dim, output_dim],
+                                        name='gat_w')
+            self.vars['gat_a'] = glorot([2 * output_dim, 1],
+                                        name='gat_a')
+
+        if self.logging:
+            self._log_vars()
+
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+
+    def _call(self, inputs):
+        self_vecs, neigh_vecs = inputs
+
+        neigh_vecs = tf.nn.dropout(neigh_vecs, 1 - self.dropout)
+        self_vecs = tf.nn.dropout(self_vecs, 1 - self.dropout)
+
+        # GAT
+        #用来把自己的特征带上去
+        from_self = tf.matmul(self_vecs, self.vars["self_weights"])
+
+        self_matmul_w = tf.matmul(self_vecs, self.vars["gat_w"])
+
+        y = tf.expand_dims(self_matmul_w, 1)
+        self_matmul_w_extend = tf.tile(y, [1, tf.shape(neigh_vecs)[1], 1])
+
+        B_ = tf.tile(self.vars["gat_w"], [tf.shape(neigh_vecs)[0], 1])
+        gat_w_extend_for_neigh = tf.reshape(B_, [tf.shape(neigh_vecs)[0], tf.shape(self.vars["gat_w"])[0], tf.shape(self.vars["gat_w"])[1]])
+        neigh_matmul_w = tf.matmul(neigh_vecs, gat_w_extend_for_neigh)
+
+
+        self_neigh_concat = tf.concat([self_matmul_w_extend, neigh_matmul_w], 2)
+
+        C_ = tf.tile(self.vars["gat_a"], [tf.shape(self_neigh_concat)[0], 1])
+        gat_a_extend_for_concat = tf.reshape(C_, [tf.shape(self_neigh_concat)[0], tf.shape(self.vars["gat_a"])[0], tf.shape(self.vars["gat_a"])[1]])
+        a_w_matmul = tf.matmul(self_neigh_concat, gat_a_extend_for_concat)
+
+        coefs = tf.nn.softmax(tf.nn.leaky_relu(a_w_matmul), axis=1)
+
+        #对于两层GCN来说，有三个histogram图，因为第一层GCN有one-hop和two-hop两个聚合操作。
+        tf.summary.histogram("coefs", coefs)
+
+        coefs_multi_neigh = tf.math.multiply(coefs, neigh_matmul_w)
+
+        self_gat_vector = tf.reduce_sum(coefs_multi_neigh, axis=1)
+
+        from_neighs = self_gat_vector
+
+        ##
+        if not self.concat:
+            #output = from_neighs
+            output = tf.add_n([from_self, from_neighs])
+        else:
+            output = tf.concat([from_self, from_neighs], axis=1)
+
+        # bias
+        if self.bias:
+            output += self.vars['bias']
+
+        return self.act(output)
